@@ -221,7 +221,7 @@ class ValidationSpec extends FlatSpec with Matchers {
           T(1210, 1310, 1290, 1410)
         ))
         )
-        .update(RoiImageInfo.SCORE, Tensor[Float](T(1, 2, 4, 3, 1, 3, 4, 2)))
+        .update(RoiImageInfo.SCORES, Tensor[Float](T(1, 2, 4, 3, 1, 3, 4, 2)))
     )
     val v2 = new MeanAveragePrecisionObjectDetection(3, 0.5f)
     val result2 = v2(outputTable, target)
