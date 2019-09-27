@@ -22,6 +22,8 @@ import com.intel.analytics.bigdl.nn.AbsCriterion
 import com.intel.analytics.bigdl.nn.abstractnn.Activity
 import com.intel.analytics.bigdl.tensor.Tensor
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
+import com.intel.analytics.bigdl.transform.vision.image.label.roi.RoiLabel
+import com.intel.analytics.bigdl.utils.Table
 import org.apache.commons.lang3.SerializationUtils
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
@@ -431,9 +433,7 @@ private[bigdl] class GroundTruthBBox(val label: Int, val diff: Float,
  * imgId is the batch number of the sample. imgId begins with 0.
  * Multiple samples may share one imgId
  *
- * The target vector (Ground truth) is a [num_of_gt X 7] matrix
- * having format [<sample_gt>, <sample_gt>, <sample_gt>, ...]
- * where <sample_gt> = <imgId, label, diff, bbox x4>  the labels begins with 0
+ * The target vector (Ground truth) is a table with fields defined in RoiLabel class
  *
  * @param iou the IOU threshold
  * @param classes the number of classes
@@ -445,10 +445,7 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
   classes: Int, iou: Float = 0.5f, useVoc2007: Boolean = false, skipClass: Int = -1)(
   implicit ev: TensorNumeric[T]) extends ValidationMethod[T] {
   override def apply(output: Activity, target: Activity): ValidationResult = {
-    val gtTensor = target.toTensor[Float]
-    require(gtTensor.dim() == 2 && gtTensor.size(2) == 7,
-      "the ground truth tensor should have 2 dimensions " +
-        "and the second dimension should have size of 7")
+    val gtTable = target.toTable
 
     // the number of GT bboxes for each class
     val gtCntByClass = new Array[Int](classes)
@@ -458,27 +455,25 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
     // this converts the image-id in target tensor to the index within the image array
     // imgId is for output tensor and target tensor. imgIdx is for gtImages
     // the imgId should start from 0
-    val imgId2imgIdx = scala.collection.mutable.Map[Int, Int]()
-    for(i <- 1 to gtTensor.size(1)) {
+    for(i <- 1 to gtTable.length()) {
       // the tensor is: (imgId, label, diff, bbox x4)
-      val imgId = gtTensor.valueAt(i, 1).toInt
-      val label = gtTensor.valueAt(i, 2).toInt - 1
-      val diff = gtTensor.valueAt(i, 3).toInt
+      gtImages += new ArrayBuffer[GroundTruthBBox]()
+      val roiLabel = gtTable[Table](i)
+      val bbox = RoiLabel.getBBoxes(roiLabel)
+      val tclasses = RoiLabel.getClasses(roiLabel)
+      for (j <- 1 to bbox.size(1)) {
+        val (label, diff) = if (tclasses.dim() == 2) {
+          (tclasses.valueAt(1, j).toInt, tclasses.valueAt(2, j))
+        } else {
+          (tclasses.valueAt(j).toInt, 0f)
+        }
+        gtImages.last += new GroundTruthBBox(label, diff, bbox.valueAt(j, 1),
+          bbox.valueAt(j, 2), bbox.valueAt(j, 3), bbox.valueAt(j, 4))
+        require(label >= 0 && label < classes, s"Bad label id $label")
 
-      val imgIdx = if (!imgId2imgIdx.contains(imgId)) {
-        val sz = gtImages.size
-        imgId2imgIdx(imgId) = sz
-        gtImages += new ArrayBuffer[GroundTruthBBox]()
-        sz
-      } else {
-        imgId2imgIdx(imgId)
-      }
-      gtImages(imgIdx) += new GroundTruthBBox(label, diff, gtTensor.valueAt(i, 4),
-        gtTensor.valueAt(i, 5), gtTensor.valueAt(i, 6), gtTensor.valueAt(i, 7))
-      require(label >= 0 && label < classes, s"Bad label id $label")
-
-      if (diff == 0) {
-        gtCntByClass(label) += 1
+        if (diff == 0) {
+          gtCntByClass(label) += 1
+        }
       }
     }
 
@@ -493,43 +488,43 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
     require(outTensor.dim() == 2, "the output tensor should have 2 dimensions")
     for (imgId <- 0 until outTensor.size(1)) {
       // for each image
-      if (imgId2imgIdx.contains(imgId)) {
-        val imgIdx = imgId2imgIdx(imgId) // index within gtImages
-        val gtBbox = gtImages(imgIdx)
-        val batch = outTensor.select(1, imgId + 1)
-        val batchSize = batch.valueAt(1).toInt
-        var offset = 2
-        for (bboxIdx <- 0 until batchSize) {
-          // for each predicted bboxes
-          val label = batch.valueAt(offset).toInt
-          require(label >= 0 && label < classes, s"Bad label id $label")
-          val score = batch.valueAt(offset + 1)
-          val x1 = batch.valueAt(offset + 2)
-          val y1 = batch.valueAt(offset + 3)
-          val x2 = batch.valueAt(offset + 4)
-          val y2 = batch.valueAt(offset + 5)
-          // for each GT boxes, try to find a matched one with current prediction
-          val matchedGt = gtBbox.filter(gt => label == gt.label && gt.canOccupy)
-            .flatMap(gt => { // calculate and filter out the bbox
-              val iouRate = gt.getIOURate(x1, y1, x2, y2)
-              if (iouRate >= iou) Iterator.single((gt, iouRate)) else Iterator.empty
-            })
-            .reduceOption( (gtArea1, gtArea2) => { // find max IOU bbox
-              if (gtArea1._2 > gtArea2._2) gtArea1 else gtArea2
-            })
-            .map(bbox => { // occupy the bbox
-              bbox._1.occupy()
-              bbox._1
-            })
-          if (matchedGt.isEmpty || matchedGt.get.diff == 0) {
-            predictByClass(label).append((score, matchedGt.isDefined))
-          }
-          // else: when the prediction matches a "difficult" GT, do nothing
-          // it is neither TP nor FP
-          // what is "difficult"? I have no idea...
-          offset += 6
+
+      val imgIdx = imgId // index within gtImages
+      val gtBbox = gtImages(imgIdx)
+      val batch = outTensor.select(1, imgId + 1)
+      val batchSize = batch.valueAt(1).toInt
+      var offset = 2
+      for (bboxIdx <- 0 until batchSize) {
+        // for each predicted bboxes
+        val label = batch.valueAt(offset).toInt
+        require(label >= 0 && label < classes, s"Bad label id $label")
+        val score = batch.valueAt(offset + 1)
+        val x1 = batch.valueAt(offset + 2)
+        val y1 = batch.valueAt(offset + 3)
+        val x2 = batch.valueAt(offset + 4)
+        val y2 = batch.valueAt(offset + 5)
+        // for each GT boxes, try to find a matched one with current prediction
+        val matchedGt = gtBbox.filter(gt => label == gt.label && gt.canOccupy)
+          .flatMap(gt => { // calculate and filter out the bbox
+            val iouRate = gt.getIOURate(x1, y1, x2, y2)
+            if (iouRate >= iou) Iterator.single((gt, iouRate)) else Iterator.empty
+          })
+          .reduceOption((gtArea1, gtArea2) => { // find max IOU bbox
+            if (gtArea1._2 > gtArea2._2) gtArea1 else gtArea2
+          })
+          .map(bbox => { // occupy the bbox
+            bbox._1.occupy()
+            bbox._1
+          })
+        if (matchedGt.isEmpty || matchedGt.get.diff == 0) {
+          predictByClass(label).append((score, matchedGt.isDefined))
         }
+        // else: when the prediction matches a "difficult" GT, do nothing
+        // it is neither TP nor FP
+        // what is "difficult"? I have no idea...
+        offset += 6
       }
+
       // if the image id does not have ground truth, do nothing
     }
     new MAPValidationResult(classes, -1, predictByClass, gtCntByClass, useVoc2007, skipClass)

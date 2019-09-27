@@ -48,7 +48,11 @@ object COCOSeqFileLoader {
         val labelClasses = Tensor(anno.map(_.categoryId.toFloat), Array(anno.length))
         val bboxes = Tensor(
           anno.toIterator.flatMap(ann => {
-            Iterator(ann.bbox1, ann.bbox2, ann.bbox3, ann.bbox4)
+            val x1 = Math.max(0, ann.bbox1)
+            val y1 = Math.max(0, ann.bbox2)
+            val x2 = Math.min(width - 1, x1 + Math.max(0, ann.bbox3 - 1))
+            val y2 = Math.min(height - 1, y1 + Math.max(0, ann.bbox4 - 1))
+            Iterator(x1, y1, x2, y2)
           }).toArray,
           Array(anno.length, 4))
         val isCrowd = Tensor(anno.map(ann => if (ann.isCrowd) 1f else 0f), Array(anno.length))
@@ -63,6 +67,7 @@ object COCOSeqFileLoader {
         imf(RoiLabel.ISCROWD) = isCrowd
         imf
       }
+        .coalesce(num)
     ImageFrame.rdd(rawData)
   }
 
