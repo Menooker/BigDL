@@ -22,6 +22,7 @@ import com.intel.analytics.bigdl.nn.AbsCriterion
 import com.intel.analytics.bigdl.nn.abstractnn.Activity
 import com.intel.analytics.bigdl.tensor.Tensor
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
+import com.intel.analytics.bigdl.transform.vision.image.RoiImageInfo
 import com.intel.analytics.bigdl.transform.vision.image.label.roi.RoiLabel
 import com.intel.analytics.bigdl.utils.Table
 import org.apache.commons.lang3.SerializationUtils
@@ -459,8 +460,8 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
       // the tensor is: (imgId, label, diff, bbox x4)
       gtImages += new ArrayBuffer[GroundTruthBBox]()
       val roiLabel = gtTable[Table](i)
-      val bbox = RoiLabel.getBBoxes(roiLabel)
-      val tclasses = RoiLabel.getClasses(roiLabel)
+      val bbox = RoiImageInfo.getBBoxes(roiLabel)
+      val tclasses = RoiImageInfo.getClasses(roiLabel)
       for (j <- 1 to bbox.size(1)) {
         val (label, diff) = if (tclasses.dim() == 2) {
           (tclasses.valueAt(1, j).toInt, tclasses.valueAt(2, j))
