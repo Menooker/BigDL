@@ -70,7 +70,6 @@ object Test {
     val broadcastModel = ModelBroadcast[Float]().broadcast(rdd.sparkContext, model)
     val broadcastEvaluator = rdd.sparkContext.broadcast(evaluator)
     val broadcastTransformers = rdd.sparkContext.broadcast(preProcessor)
-    val start = System.nanoTime()
     val output = rdd.mapPartitions(dataIter => {
       val localModel = broadcastModel.value()
       val localEvaluator = broadcastEvaluator.value.clone()
@@ -94,7 +93,7 @@ object Test {
         .set("spark.task.maxFailures", "1")
       val sc = new SparkContext(conf)
       Engine.init
-      val ds = SeqFileFolder.filesToRoiImageFrame(param.folder, sc, Some(param.partitions))
+      val rawDs = SeqFileFolder.filesToRoiImageFrame(param.folder, sc, Some(param.partitions))
         .toDistributed().rdd
         .filter(imf => {
           imf[Array[Byte]](ImageFeature.bytes).length >= imf.getOriginalWidth * imf
@@ -106,10 +105,8 @@ object Test {
               true
             } else false
           })
-        // .sample(false, 0.001)
-      println(ds.partitions.size)
+      val ds = DataSet.rdd(rawDs).data(false)
       val model = Module.loadModule[Float](param.model).evaluate()
-      // SpatialShareConvolution.shareConvolution[Float](model)
 
       val preProcessor = MTImageFeatureToBatch(param.resolution, param.resolution,
         param.batchSize,
@@ -121,13 +118,6 @@ object Test {
           validWidth = param.resolution), toRGB = false, extractRoi = true)
       val eval = new MeanAveragePrecisionObjectDetection[Float](81,
         useVoc2007 = true, skipClass = 0)
-      /* val d = ds.take(100).toIterator
-      val batch = preProcessor(d)
-      val re = batch.map{ case b =>
-        val result = model.forward(b.getInput())
-        eval(result, b.getTarget())
-      }.reduce( _ + _)
-      println(re.toString()) */
       test(ds, model, preProcessor, eval)
     }
   }

@@ -294,6 +294,70 @@ object MAPUtil {
     val end = Math.min(k, q.size)
     (1 to end).map(_ => q.dequeue()).toArray
   }
+
+  /**
+   * convert the ground truth into parsed GroundTruthBBoxes
+   * @param gtTable
+   * @param classes
+   * @return (array of GT BBoxes of images, # of GT bboxes for each class)
+   */
+  def gtTablesToGroundTruthBBoxes(gtTable: Table, classes: Int):
+  (Array[ArrayBuffer[GroundTruthBBox]], Array[Int]) = {
+    // the number of GT bboxes for each class
+    val gtCntByClass = new Array[Int](classes)
+
+    // one image may contain multiple Ground truth bboxes
+    val gtImages = (1 to gtTable.length()).map { case i =>
+      val gtImage = new ArrayBuffer[GroundTruthBBox]()
+      val roiLabel = gtTable[Table](i)
+      val bbox = RoiImageInfo.getBBoxes(roiLabel)
+      val tclasses = RoiImageInfo.getClasses(roiLabel)
+      for (j <- 1 to bbox.size(1)) {
+        val (label, diff) = if (tclasses.dim() == 2) {
+          (tclasses.valueAt(1, j).toInt, tclasses.valueAt(2, j))
+        } else {
+          (tclasses.valueAt(j).toInt, 0f)
+        }
+        gtImage += new GroundTruthBBox(label, diff, bbox.valueAt(j, 1),
+          bbox.valueAt(j, 2), bbox.valueAt(j, 3), bbox.valueAt(j, 4))
+        require(label >= 0 && label < classes, s"Bad label id $label")
+
+        if (diff == 0) {
+          gtCntByClass(label) += 1
+        }
+      }
+      gtImage
+    }.toArray
+    (gtImages, gtCntByClass)
+  }
+
+  /**
+   * For a detection, match it with all GT boxes. Record the match in "predictByClass"
+   */
+  def parseDetection(gtBbox: ArrayBuffer[GroundTruthBBox], label: Int, score: Float, x1: Float,
+    y1: Float, x2: Float, y2: Float, classes: Int, iou: Float,
+    predictByClass: Array[ArrayBuffer[(Float, Boolean)]]): Unit = {
+    require(label >= 0 && label < classes, s"Bad label id $label")
+    // for each GT boxes, try to find a matched one with current prediction
+    val matchedGt = gtBbox.filter(gt => label == gt.label && gt.canOccupy)
+      .flatMap(gt => { // calculate and filter out the bbox
+        val iouRate = gt.getIOURate(x1, y1, x2, y2)
+        if (iouRate >= iou) Iterator.single((gt, iouRate)) else Iterator.empty
+      })
+      .reduceOption((gtArea1, gtArea2) => { // find max IOU bbox
+        if (gtArea1._2 > gtArea2._2) gtArea1 else gtArea2
+      })
+      .map(bbox => { // occupy the bbox
+        bbox._1.occupy()
+        bbox._1
+      })
+    if (matchedGt.isEmpty || matchedGt.get.diff == 0) {
+      predictByClass(label).append((score, matchedGt.isDefined))
+    }
+    // else: when the prediction matches a "difficult" GT, do nothing
+    // it is neither TP nor FP
+    // "difficult" is defined in PASCAL VOC dataset, meaning the image is difficult to detect
+  }
 }
 
 /**
@@ -423,72 +487,6 @@ private[bigdl] class GroundTruthBBox(val label: Int, val diff: Float,
   }
 }
 
-private[bigdl] object MeanAveragePrecisionObjectDetection {
-  /**
-   * convert the ground truth into parsed GroundTruthBBoxes
-   * @param gtTable
-   * @param classes
-   * @return (array of GT BBoxes of images, # of GT bboxes for each class)
-   */
-  def gtTablesToGroundTruthBBoxes(gtTable: Table, classes: Int):
-  (Array[ArrayBuffer[GroundTruthBBox]], Array[Int]) = {
-    // the number of GT bboxes for each class
-    val gtCntByClass = new Array[Int](classes)
-
-    // one image may contain multiple Ground truth bboxes
-    val gtImages = (1 to gtTable.length()).map { case i =>
-      val gtImage = new ArrayBuffer[GroundTruthBBox]()
-      val roiLabel = gtTable[Table](i)
-      val bbox = RoiImageInfo.getBBoxes(roiLabel)
-      val tclasses = RoiImageInfo.getClasses(roiLabel)
-      for (j <- 1 to bbox.size(1)) {
-        val (label, diff) = if (tclasses.dim() == 2) {
-          (tclasses.valueAt(1, j).toInt, tclasses.valueAt(2, j))
-        } else {
-          (tclasses.valueAt(j).toInt, 0f)
-        }
-        gtImage += new GroundTruthBBox(label, diff, bbox.valueAt(j, 1),
-          bbox.valueAt(j, 2), bbox.valueAt(j, 3), bbox.valueAt(j, 4))
-        require(label >= 0 && label < classes, s"Bad label id $label")
-
-        if (diff == 0) {
-          gtCntByClass(label) += 1
-        }
-      }
-      gtImage
-    }.toArray
-    (gtImages, gtCntByClass)
-  }
-
-  /**
-   * For a detection, match it with all GT boxes. Record the match in "predictByClass"
-   */
-  def parseDetection(gtBbox: ArrayBuffer[GroundTruthBBox], label: Int, score: Float, x1: Float,
-    y1: Float, x2: Float, y2: Float, classes: Int, iou: Float,
-    predictByClass: Array[ArrayBuffer[(Float, Boolean)]]): Unit = {
-    require(label >= 0 && label < classes, s"Bad label id $label")
-    // for each GT boxes, try to find a matched one with current prediction
-    val matchedGt = gtBbox.filter(gt => label == gt.label && gt.canOccupy)
-      .flatMap(gt => { // calculate and filter out the bbox
-        val iouRate = gt.getIOURate(x1, y1, x2, y2)
-        if (iouRate >= iou) Iterator.single((gt, iouRate)) else Iterator.empty
-      })
-      .reduceOption((gtArea1, gtArea2) => { // find max IOU bbox
-        if (gtArea1._2 > gtArea2._2) gtArea1 else gtArea2
-      })
-      .map(bbox => { // occupy the bbox
-        bbox._1.occupy()
-        bbox._1
-      })
-    if (matchedGt.isEmpty || matchedGt.get.diff == 0) {
-      predictByClass(label).append((score, matchedGt.isDefined))
-    }
-    // else: when the prediction matches a "difficult" GT, do nothing
-    // it is neither TP nor FP
-    // "difficult" is defined in PASCAL VOC dataset, meaning the image is difficult to detect
-  }
-}
-
 /** MeanAveragePrecision for Object Detection
  * The class label begins with 0
  *
@@ -521,7 +519,7 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
   override def apply(output: Activity, target: Activity): ValidationResult = {
     // one image may contain multiple Ground truth bboxes
     val (gtImages, gtCntByClass) =
-      MeanAveragePrecisionObjectDetection.gtTablesToGroundTruthBBoxes(target.toTable, classes)
+      MAPUtil.gtTablesToGroundTruthBBoxes(target.toTable, classes)
 
     // the predicted bboxes for each classes
     // predictByClass(classIdx)(bboxNum) is (Confidence, GT)
@@ -548,8 +546,8 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
             val y1 = batch.valueAt(offset + 3)
             val x2 = batch.valueAt(offset + 4)
             val y2 = batch.valueAt(offset + 5)
-            MeanAveragePrecisionObjectDetection
-              .parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iou, predictByClass)
+            MAPUtil.parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iou,
+              predictByClass)
             offset += 6
           }
         }
@@ -569,8 +567,8 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
             val x2 = bboxes.valueAt(bboxIdx, 3)
             val y2 = bboxes.valueAt(bboxIdx, 4)
             val label = labels.valueAt(bboxIdx).toInt
-            MeanAveragePrecisionObjectDetection
-              .parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iou, predictByClass)
+            MAPUtil.parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iou,
+              predictByClass)
           }
         }
     }
