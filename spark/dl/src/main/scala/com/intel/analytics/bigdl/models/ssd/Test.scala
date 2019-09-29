@@ -17,8 +17,8 @@
 package com.intel.analytics.bigdl.models.ssd
 
 import com.intel.analytics.bigdl.Module
-import com.intel.analytics.bigdl.dataset.{MiniBatch, Transformer}
-import com.intel.analytics.bigdl.dataset.segmentation.COCO.COCOSeqFileLoader
+import com.intel.analytics.bigdl.dataset.DataSet.{ImageFolder, SeqFileFolder}
+import com.intel.analytics.bigdl.dataset.{DataSet, MiniBatch, Transformer}
 import com.intel.analytics.bigdl.models.utils.ModelBroadcast
 import com.intel.analytics.bigdl.nn.{Module, SpatialShareConvolution}
 import com.intel.analytics.bigdl.optim.{MeanAveragePrecisionObjectDetection, ValidationMethod}
@@ -94,7 +94,7 @@ object Test {
         .set("spark.task.maxFailures", "1")
       val sc = new SparkContext(conf)
       Engine.init
-      val ds = COCOSeqFileLoader.filesToImageFrame(param.folder, sc, Some(param.partitions))
+      val ds = SeqFileFolder.filesToRoiImageFrame(param.folder, sc, Some(param.partitions))
         .toDistributed().rdd
         .filter(imf => {
           imf[Array[Byte]](ImageFeature.bytes).length >= imf.getOriginalWidth * imf
