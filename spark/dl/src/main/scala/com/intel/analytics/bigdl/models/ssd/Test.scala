@@ -116,8 +116,7 @@ object Test {
         ChannelNormalize(123f, 117f, 104f, 1, 1, 1) ->
         MatToFloats(validHeight = param.resolution,
           validWidth = param.resolution), toRGB = false, extractRoi = true)
-      val eval = new MeanAveragePrecisionObjectDetection[Float](81,
-        useVoc2007 = true, skipClass = 0)
+      val eval = MeanAveragePrecisionObjectDetection.createCOCO(81)
       test(ds, model, preProcessor, eval)
     }
   }

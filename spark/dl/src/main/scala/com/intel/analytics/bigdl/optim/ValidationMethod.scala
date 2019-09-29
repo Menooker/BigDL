@@ -301,7 +301,7 @@ object MAPUtil {
    * @param classes
    * @return (array of GT BBoxes of images, # of GT bboxes for each class)
    */
-  def gtTablesToGroundTruthBBoxes(gtTable: Table, classes: Int):
+  def gtTablesToGroundTruthBBoxes(gtTable: Table, classes: Int, numIOU: Int):
   (Array[ArrayBuffer[GroundTruthBBox]], Array[Int]) = {
     // the number of GT bboxes for each class
     val gtCntByClass = new Array[Int](classes)
@@ -318,7 +318,7 @@ object MAPUtil {
         } else {
           (tclasses.valueAt(j).toInt, 0f)
         }
-        gtImage += new GroundTruthBBox(label, diff, bbox.valueAt(j, 1),
+        gtImage += new GroundTruthBBox(numIOU, label, diff, bbox.valueAt(j, 1),
           bbox.valueAt(j, 2), bbox.valueAt(j, 3), bbox.valueAt(j, 4))
         require(label >= 0 && label < classes, s"Bad label id $label")
 
@@ -335,28 +335,30 @@ object MAPUtil {
    * For a detection, match it with all GT boxes. Record the match in "predictByClass"
    */
   def parseDetection(gtBbox: ArrayBuffer[GroundTruthBBox], label: Int, score: Float, x1: Float,
-    y1: Float, x2: Float, y2: Float, classes: Int, iou: Float,
-    predictByClass: Array[ArrayBuffer[(Float, Boolean)]]): Unit = {
+    y1: Float, x2: Float, y2: Float, classes: Int, iou: Array[Float],
+    predictByClasses: Array[Array[ArrayBuffer[(Float, Boolean)]]]): Unit = {
     require(label >= 0 && label < classes, s"Bad label id $label")
-    // for each GT boxes, try to find a matched one with current prediction
-    val matchedGt = gtBbox.filter(gt => label == gt.label && gt.canOccupy)
-      .flatMap(gt => { // calculate and filter out the bbox
-        val iouRate = gt.getIOURate(x1, y1, x2, y2)
-        if (iouRate >= iou) Iterator.single((gt, iouRate)) else Iterator.empty
-      })
-      .reduceOption((gtArea1, gtArea2) => { // find max IOU bbox
-        if (gtArea1._2 > gtArea2._2) gtArea1 else gtArea2
-      })
-      .map(bbox => { // occupy the bbox
-        bbox._1.occupy()
-        bbox._1
-      })
-    if (matchedGt.isEmpty || matchedGt.get.diff == 0) {
-      predictByClass(label).append((score, matchedGt.isDefined))
+    for (i <- iou.indices) {
+      // for each GT boxes, try to find a matched one with current prediction
+      val matchedGt = gtBbox.filter(gt => label == gt.label && gt.canOccupy(i))
+        .flatMap(gt => { // calculate and filter out the bbox
+          val iouRate = gt.getIOURate(x1, y1, x2, y2)
+          if (iouRate >= iou(i)) Iterator.single((gt, iouRate)) else Iterator.empty
+        })
+        .reduceOption((gtArea1, gtArea2) => { // find max IOU bbox
+          if (gtArea1._2 > gtArea2._2) gtArea1 else gtArea2
+        })
+        .map(bbox => { // occupy the bbox
+          bbox._1.occupy(i)
+          bbox._1
+        })
+      if (matchedGt.isEmpty || matchedGt.get.diff == 0) {
+        predictByClasses(i)(label).append((score, matchedGt.isDefined))
+      }
+      // else: when the prediction matches a "difficult" GT, do nothing
+      // it is neither TP nor FP
+      // "difficult" is defined in PASCAL VOC dataset, meaning the image is difficult to detect
     }
-    // else: when the prediction matches a "difficult" GT, do nothing
-    // it is neither TP nor FP
-    // "difficult" is defined in PASCAL VOC dataset, meaning the image is difficult to detect
   }
 }
 
@@ -453,20 +455,21 @@ class MAPValidationResult(
   }
 }
 
-private[bigdl] class GroundTruthBBox(val label: Int, val diff: Float,
+private[bigdl] class GroundTruthBBox(numIOU: Int, val label: Int, val diff: Float,
   val xmin: Float, val ymin: Float, val xmax: Float, val ymax: Float) {
   private val area = (xmax - xmin) * (ymax - ymin)
 
   // if is false, the bbox is not matched with any predictions
-  private var isOccupied = false
+  // indexed by the IOU index
+  private val isOccupied = new Array[Boolean](numIOU)
 
   /**
    * Returns if any previous prediction is matched with the current bbox
    * @return
    */
-  def canOccupy: Boolean = !isOccupied
-  def occupy(): Unit = {
-    isOccupied = true
+  def canOccupy(iouIdx: Int): Boolean = !isOccupied(iouIdx)
+  def occupy(iouIdx: Int): Unit = {
+    isOccupied(iouIdx) = true
   }
 
   /** get the IOU rate of another bbox with the current bbox
@@ -484,6 +487,42 @@ private[bigdl] class GroundTruthBBox(val label: Int, val diff: Float,
     val iymax = Math.min(ymax, y2)
     val inter = Math.max(ixmax - ixmin, 0) * Math.max(iymax - iymin, 0)
     inter / ((x2 - x1) * (y2 - y1) + area - inter)
+  }
+}
+
+class MAPMultiIOUValidationResult(
+  private val nClass: Int,
+  // take the first k samples, or -1 for all samples
+  private val k: Int,
+  // the predicts for each classes.
+  // predictForClassIOU(iouIdx)(cls) is an array of (Confidence, GT)
+  private val predictForClassIOU: Array[Array[ArrayBuffer[(Float, Boolean)]]],
+  private var gtCntForClass: Array[Int],
+  private val iouRange: (Float, Float),
+  private val useVoc2007: Boolean = false,
+  private val skipClass: Int = -1
+)
+  extends ValidationResult {
+
+  val impl = predictForClassIOU.map(predictForClass => {
+    new MAPValidationResult(nClass, k, predictForClass, gtCntForClass, useVoc2007, skipClass)
+  })
+  override def result(): (Float, Int) = (impl.map(_.result()._1).sum / impl.length, 1)
+
+  // scalastyle:off methodName
+  override def +(other: ValidationResult): ValidationResult = {
+    val o = other.asInstanceOf[MAPMultiIOUValidationResult]
+    require(o.predictForClassIOU.length == predictForClassIOU.length,
+      "To merge MAPMultiIOUValidationResult, the length of predictForClassIOU should be" +
+        "the same")
+    impl.zip(o.impl).foreach { case (v1, v2) => v1 + v2 }
+    this
+  }
+  // scalastyle:on methodName
+
+  override protected def format(): String = {
+    val step = (iouRange._2 - iouRange._1) / (predictForClassIOU.length - 1)
+    s"MAP@IOU(${iouRange._1}:$step:${iouRange._2})=${result()._1}"
   }
 }
 
@@ -507,26 +546,27 @@ private[bigdl] class GroundTruthBBox(val label: Int, val diff: Float,
  * The "target" (Ground truth) is a table with the same structure of "output", except that
  * it does not have "score" field
  *
- * @param iou the IOU threshold
  * @param classes the number of classes
+ * @param topK only take topK confident predictions (-1 for all predictions)
+ * @param iouThres the IOU thresholds
  * @param useVoc2007 use validation method before voc2010 (i.e. voc2007)
  * @param skipClass skip calculating on a specific class (e.g. background)
  *                  the class index starts from 0, or is -1 if no skipping
  */
 class MeanAveragePrecisionObjectDetection[T: ClassTag](
-  classes: Int, iou: Float = 0.5f, useVoc2007: Boolean = false, skipClass: Int = -1)(
+  classes: Int, topK: Int = -1, iouThres: Array[Float] = Array(0.5f),
+  useVoc2007: Boolean = false, skipClass: Int = -1)(
   implicit ev: TensorNumeric[T]) extends ValidationMethod[T] {
   override def apply(output: Activity, target: Activity): ValidationResult = {
     // one image may contain multiple Ground truth bboxes
     val (gtImages, gtCntByClass) =
-      MAPUtil.gtTablesToGroundTruthBBoxes(target.toTable, classes)
+      MAPUtil.gtTablesToGroundTruthBBoxes(target.toTable, classes, iouThres.length)
 
     // the predicted bboxes for each classes
-    // predictByClass(classIdx)(bboxNum) is (Confidence, GT)
-    val predictByClass = new Array[ArrayBuffer[(Float, Boolean)]](classes)
-    for (i <- predictByClass.indices) {
-      predictByClass(i) = new ArrayBuffer[(Float, Boolean)]
-    }
+    // predictByClasses(iouIdx)(classIdx)(bboxNum) is (Confidence, GT)
+    val predictByClasses = iouThres.map(_iou => {
+      (0 until classes).map(_ => new ArrayBuffer[(Float, Boolean)]).toArray
+    })
 
     output match {
       case outTensor: Tensor[Float] =>
@@ -546,8 +586,8 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
             val y1 = batch.valueAt(offset + 3)
             val x2 = batch.valueAt(offset + 4)
             val y2 = batch.valueAt(offset + 5)
-            MAPUtil.parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iou,
-              predictByClass)
+            MAPUtil.parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iouThres,
+              predictByClasses)
             offset += 6
           }
         }
@@ -567,16 +607,57 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
             val x2 = bboxes.valueAt(bboxIdx, 3)
             val y2 = bboxes.valueAt(bboxIdx, 4)
             val label = labels.valueAt(bboxIdx).toInt
-            MAPUtil.parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iou,
-              predictByClass)
+            MAPUtil.parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iouThres,
+              predictByClasses)
           }
         }
     }
-
-    new MAPValidationResult(classes, -1, predictByClass, gtCntByClass, useVoc2007, skipClass)
+    if (iouThres.length != 1) {
+      new MAPMultiIOUValidationResult(classes, topK, predictByClasses, gtCntByClass,
+        (iouThres.head, iouThres.last), useVoc2007, skipClass)
+    } else {
+      new MAPValidationResult(classes, topK, predictByClasses.head, gtCntByClass, useVoc2007,
+        skipClass)
+    }
   }
 
   override protected def format(): String = s"MAPObjectDetection"
+}
+
+object MeanAveragePrecisionObjectDetection {
+  /**
+   * Create MeanAveragePrecision validation method using COCO's algorithm
+   *
+   * @param nClasses the number of classes
+   * @param topK only take topK confident predictions (-1 for all predictions)
+   * @param skipClass skip calculating on a specific class (e.g. background)
+   *                  the class index starts from 0, or is -1 if no skipping
+   * @param iouThres the IOU thresholds, (rangeStart, stepSize, numOfThres), inclusive
+   * @return MeanAveragePrecisionObjectDetection
+   */
+  def createCOCO(nClasses: Int, topK: Int = 100, skipClass: Int = 0,
+    iouThres: (Float, Float, Int) = (0.5f, 0.05f, 10))
+  : MeanAveragePrecisionObjectDetection[Float] = {
+    new MeanAveragePrecisionObjectDetection[Float](nClasses, topK,
+      (0 until iouThres._3).map(iouThres._1 + _ * iouThres._2).toArray,
+      true, skipClass)
+  }
+
+  /**
+   * Create MeanAveragePrecision validation method using Pascal VOC's algorithm
+   *
+   * @param nClasses the number of classes
+   * @param useVoc2007 if using the algorithm in Voc2007 (11 points)
+   * @param topK only take topK confident predictions (-1 for all predictions)
+   * @param skipClass skip calculating on a specific class (e.g. background)
+   *                  the class index starts from 0, or is -1 if no skipping
+   * @return MeanAveragePrecisionObjectDetection
+   */
+  def createPascalVOC(nClasses: Int, useVoc2007: Boolean = false, topK: Int = -1,
+    skipClass: Int = 0) : MeanAveragePrecisionObjectDetection[Float] = {
+    new MeanAveragePrecisionObjectDetection[Float](nClasses, topK, useVoc2007 = useVoc2007,
+      skipClass = skipClass)
+  }
 }
 
 /**

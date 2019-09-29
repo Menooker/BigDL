@@ -2185,7 +2185,8 @@ class PythonBigDL[T: ClassTag](implicit ev: TensorNumeric[T]) extends Serializab
 
   def createMeanAveragePrecisionObjectDetection(classes: Int, iou: Float, useVoc2007: Boolean,
     skipClass: Int): ValidationMethod[T] = {
-    new MeanAveragePrecisionObjectDetection(classes, iou, useVoc2007, skipClass)
+    new MeanAveragePrecisionObjectDetection(classes, iouThres = Array(iou),
+      useVoc2007 = useVoc2007, skipClass = skipClass)
   }
 
   def createLoss(criterion: Criterion[T]): ValidationMethod[T] = {
