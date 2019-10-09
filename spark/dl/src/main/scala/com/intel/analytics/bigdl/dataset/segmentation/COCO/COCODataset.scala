@@ -20,10 +20,13 @@ import com.google.gson.{Gson, GsonBuilder, JsonDeserializationContext, JsonDeser
 import com.google.gson.annotations.SerializedName
 import com.google.gson.reflect.TypeToken
 import com.google.gson.stream.{JsonReader, JsonWriter}
+import com.intel.analytics.bigdl.nn.abstractnn.Activity
 import com.intel.analytics.bigdl.transform.vision.image.label.roi.{PolyMasks, RLEMasks, SegmentationMasks}
-import java.io.{BufferedReader, FileReader}
+import com.intel.analytics.bigdl.utils.Table
+import java.io.{BufferedReader, FileReader, FileWriter}
 import java.lang.reflect.Type
 import java.nio.ByteBuffer
+import org.apache.spark.rdd.RDD
 import scala.collection.mutable.ArrayBuffer
 
 private[bigdl] class COCOSerializeContext {
@@ -239,6 +242,15 @@ case class COCOPoly(_poly: Array[Array[Float]])
    }
  }
 
+class COCOResult(_imageId: Long, _categoryId: Long, _bbox: Array[Float], _score: Float) extends
+  Serializable {
+  // make gson happy
+  @SerializedName("image_id") val imageId: Long = _imageId
+  @SerializedName("category_id") val categoryId: Long = _categoryId
+  @SerializedName("bbox") val bbox: Array[Float] = _bbox
+  @SerializedName("score") val score: Float = _score
+}
+
 object COCODataset {
   private[bigdl] val MAGIC_NUM = 0x1f3d4e5a
   private[COCO] class AnnotationDeserializer extends
@@ -284,6 +296,26 @@ object COCODataset {
       new BufferedReader(new FileReader(path)), classOf[COCODataset])
     d.init()
     d
+  }
+
+  def writeResultsToJsonFile(r: Array[COCOResult], path: String): Unit = {
+    val fw = new FileWriter(path)
+    gson.toJson(r, fw)
+    fw.close()
+  }
+
+  def writeResultsToJsonStr(r: Array[COCOResult]): String = {
+    gson.toJson(r)
+  }
+
+  /**
+   * Convert the coco image file name into image id. The file name should be like
+   * "COCO_val2014_000000000042.jpg"
+   * @param filename
+   * @return
+   */
+  def fileName2ImgId(filename: String): Long = {
+    filename.split("_")(2).substring(0, 12).toLong
   }
 
   def main(args: Array[String]): Unit = {

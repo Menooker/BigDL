@@ -15,6 +15,7 @@
  */
 package com.intel.analytics.bigdl.transform.vision.image
 
+import com.intel.analytics.bigdl.dataset.segmentation.COCO.COCODataset
 import java.util.concurrent.atomic.AtomicInteger
 import com.intel.analytics.bigdl.dataset.{MiniBatch, Sample, Transformer, Utils}
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
@@ -319,7 +320,9 @@ class RoiMTImageFeatureToBatch private[bigdl](width: Int, height: Int,
       "in ImageFeature's ISCROWD should be equal to the number of detections in the RoiLabel")
     isCrowdData(position) = isCrowd
     labelData(position) = label
-    origSizeData(position) = img.getOriginalSize
+    val old = img.getOriginalSize
+    origSizeData(position) = (old._1, old._2,
+      COCODataset.fileName2ImgId(img[String](ImageFeature.uri)).toInt)
   }
 
   override protected def createBatch(batchSize: Int): MiniBatch[Float] = {

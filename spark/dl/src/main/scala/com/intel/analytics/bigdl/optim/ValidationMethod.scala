@@ -340,7 +340,7 @@ object MAPUtil {
     require(label >= 0 && label < classes, s"Bad label id $label")
     for (i <- iou.indices) {
       // for each GT boxes, try to find a matched one with current prediction
-      val matchedGt = gtBbox.filter(gt => label == gt.label && gt.canOccupy(i))
+      val matchedGt = gtBbox.toIterator.filter(gt => label == gt.label && gt.canOccupy(i))
         .flatMap(gt => { // calculate and filter out the bbox
           val iouRate = gt.getIOURate(x1, y1, x2, y2)
           if (iouRate >= iou(i)) Iterator.single((gt, iouRate)) else Iterator.empty
@@ -359,6 +359,28 @@ object MAPUtil {
       // it is neither TP nor FP
       // "difficult" is defined in PASCAL VOC dataset, meaning the image is difficult to detect
     }
+  }
+
+  def parseSegmentationTensorResult(outTensor: Tensor[Float],
+    func: (Int, Int, Float, Float, Float, Float, Float) => Unit): Unit = {
+      require(outTensor.dim() == 2, "the output tensor should have 2 dimensions")
+      for (imgId <- 0 until outTensor.size(1)) {
+        // for each image
+        val batch = outTensor.select(1, imgId + 1)
+        val batchSize = batch.valueAt(1).toInt
+        var offset = 2
+        for (bboxIdx <- 0 until batchSize) {
+          // for each predicted bboxes
+          val label = batch.valueAt(offset).toInt
+          val score = batch.valueAt(offset + 1)
+          val x1 = batch.valueAt(offset + 2)
+          val y1 = batch.valueAt(offset + 3)
+          val x2 = batch.valueAt(offset + 4)
+          val y2 = batch.valueAt(offset + 5)
+          func(imgId, label, score, x1, y1, x2, y2)
+          offset += 6
+        }
+      }
   }
 }
 
@@ -435,14 +457,20 @@ class MAPValidationResult(
     val result = AP.sum / (nClass - (if (skipClass == -1) 0 else 1))
     (result, 1)
   }
-  // scalastyle:off methodName
-  override def +(other: ValidationResult): ValidationResult = {
-    val o = other.asInstanceOf[MAPValidationResult]
+
+  private[optim] def mergeWithoutGtCnt(o: MAPValidationResult): MAPValidationResult = {
     require(predictForClass.length == o.predictForClass.length)
     require(gtCntForClass.length == o.gtCntForClass.length)
     predictForClass.zip(o.predictForClass).foreach {
       case (left, right) => left ++= right
     }
+    this
+  }
+
+  // scalastyle:off methodName
+  override def +(other: ValidationResult): ValidationResult = {
+    val o = other.asInstanceOf[MAPValidationResult]
+    mergeWithoutGtCnt(o)
     gtCntForClass.indices.foreach( i => gtCntForClass(i) += o.gtCntForClass(i))
     this
   }
@@ -515,14 +543,19 @@ class MAPMultiIOUValidationResult(
     require(o.predictForClassIOU.length == predictForClassIOU.length,
       "To merge MAPMultiIOUValidationResult, the length of predictForClassIOU should be" +
         "the same")
-    impl.zip(o.impl).foreach { case (v1, v2) => v1 + v2 }
+    impl.zip(o.impl).foreach { case (v1, v2) => v1.mergeWithoutGtCnt(v2) }
+    gtCntForClass.indices.foreach( i => gtCntForClass(i) += o.gtCntForClass(i))
     this
   }
   // scalastyle:on methodName
 
   override protected def format(): String = {
     val step = (iouRange._2 - iouRange._1) / (predictForClassIOU.length - 1)
-    s"MAP@IOU(${iouRange._1}:$step:${iouRange._2})=${result()._1}"
+    val results = impl.map(_.result()._1)
+    val resultStr = results.zipWithIndex
+      .map { t => s"\t IOU(${iouRange._1 + t._2 * step}) = ${t._1}\n"}
+      .reduceOption( _ + _).getOrElse("")
+    s"MAP@IOU(${iouRange._1}:$step:${iouRange._2})=${results.sum / impl.length}\n$resultStr"
   }
 }
 
@@ -570,27 +603,12 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
 
     output match {
       case outTensor: Tensor[Float] =>
-        require(outTensor.dim() == 2, "the output tensor should have 2 dimensions")
-        for (imgId <- 0 until outTensor.size(1)) {
-          // for each image
-          val imgIdx = imgId // index within gtImages
+        MAPUtil.parseSegmentationTensorResult(outTensor,
+          (imgIdx, label, score, x1, y1, x2, y2) => {
           val gtBbox = gtImages(imgIdx)
-          val batch = outTensor.select(1, imgId + 1)
-          val batchSize = batch.valueAt(1).toInt
-          var offset = 2
-          for (bboxIdx <- 0 until batchSize) {
-            // for each predicted bboxes
-            val label = batch.valueAt(offset).toInt
-            val score = batch.valueAt(offset + 1)
-            val x1 = batch.valueAt(offset + 2)
-            val y1 = batch.valueAt(offset + 3)
-            val x2 = batch.valueAt(offset + 4)
-            val y2 = batch.valueAt(offset + 5)
-            MAPUtil.parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iouThres,
-              predictByClasses)
-            offset += 6
-          }
-        }
+          MAPUtil.parseDetection(gtBbox, label, score, x1, y1, x2, y2, classes, iouThres,
+            predictByClasses = predictByClasses)
+        })
       case outTable: Table =>
         for (imgId <- 1 to outTable.length()) {
           val gtBbox = gtImages(imgId - 1)
