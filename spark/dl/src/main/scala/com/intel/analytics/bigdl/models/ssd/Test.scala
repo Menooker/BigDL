@@ -24,7 +24,7 @@ import com.intel.analytics.bigdl.models.utils.ModelBroadcast
 import com.intel.analytics.bigdl.nn.abstractnn.Activity
 import com.intel.analytics.bigdl.nn.{Module, SpatialShareConvolution}
 import com.intel.analytics.bigdl.optim.{MAPUtil, MeanAveragePrecisionObjectDetection, ValidationMethod}
-import com.intel.analytics.bigdl.transform.vision.image.{BytesToMat, ImageFeature, MTImageFeatureToBatch, MatToFloats, PixelBytesToMat, RoiImageInfo}
+import com.intel.analytics.bigdl.transform.vision.image.{BytesToMat, FeatureTransformer, ImageFeature, ImageFrameToSample, MTImageFeatureToBatch, MatToFloats, PixelBytesToMat, RoiImageInfo}
 import com.intel.analytics.bigdl.transform.vision.image.augmentation.{ChannelNormalize, RandomTransformer, Resize}
 import com.intel.analytics.bigdl.transform.vision.image.label.roi.{RoiLabel, RoiNormalize}
 import com.intel.analytics.bigdl.utils.{Engine, Table}
@@ -77,19 +77,28 @@ object Test {
       .action((x, c) => c.copy(categories = Some(x)))
   }
 
-  def test(rdd: RDD[ImageFeature], model: Module[Float], preProcessor: Transformer[ImageFeature,
-    MiniBatch[Float]], evaluator: ValidationMethod[Float]): RDD[(Activity, Activity)] = {
+  def test(rdd: RDD[ImageFeature], model: Module[Float], preprocessor: FeatureTransformer,
+    batchSize: Int, resolution: Int)
+  : RDD[ImageFeature] = {
     model.evaluate()
-    val broadcastModel = ModelBroadcast[Float]().broadcast(rdd.sparkContext, model)
-    val broadcastTransformers = rdd.sparkContext.broadcast(preProcessor)
+    val bcastModel = ModelBroadcast[Float]().broadcast(rdd.sparkContext, model)
+    val toBatch = MTImageFeatureToBatch(resolution, resolution,
+      toRGB = false, extractRoi = true, batchSize = 1,
+      transformer = preprocessor)
+    val bcastToBatch = rdd.sparkContext.broadcast(toBatch)
+    val _batchSize = batchSize
     rdd.mapPartitions(dataIter => {
-      val localModel = broadcastModel.value()
-      val localTransformer = broadcastTransformers.value.cloneTransformer()
-      val miniBatch = localTransformer(dataIter)
-      miniBatch.map(batch => {
-        val in = batch.getInput()
-        val result = localModel.forward(in)
-        (result, batch.getTarget())
+      val localModel = bcastModel.value()
+      val localTransformer = bcastToBatch.value.cloneTransformer()
+      dataIter.grouped(_batchSize).flatMap(imfs => {
+        val wrappedItr = DataSet.array(imfs.toArray).data(false)
+        val miniBatch = localTransformer(wrappedItr)
+        imfs.toIterator.zip(miniBatch).map{ case(imf, batch) =>
+          val in = batch.getInput()
+          val result = localModel.forward(in)
+          imf(ImageFeature.predict) = (result, batch.getTarget())
+          imf
+        }
       })
     })
   }
@@ -113,22 +122,20 @@ object Test {
               true
             } else false
           })
-      val ds = DataSet.rdd(rawDs).data(false)
+      val ds = rawDs
       val model = Module.loadModule[Float](param.model).evaluate()
 
-      val preProcessor = MTImageFeatureToBatch(param.resolution, param.resolution,
-        param.batchSize,
+      val preProcessor =
         PixelBytesToMat() ->
         RoiNormalize() ->
         Resize(param.resolution, param.resolution) ->
         ChannelNormalize(123f, 117f, 104f, 1, 1, 1) ->
-        MatToFloats(validHeight = param.resolution,
-          validWidth = param.resolution), toRGB = false, extractRoi = true)
+        MatToFloats(validHeight = param.resolution, validWidth = param.resolution)
       /* val eval = MeanAveragePrecisionObjectDetection.createPascalVOC(81, useVoc2007 = true,
         topK = 100
       ) */
       val eval = MeanAveragePrecisionObjectDetection.createCOCO(81)
-      val outputTarget = test(ds, model, preProcessor, eval)
+      val outputTarget = test(ds, model, preProcessor, param.batchSize, param.resolution)
       if (param.output.isDefined) {
         require(param.batchSize == 1, "If you need to output the result in JSON, the batchSize" +
           " must be 1")
@@ -137,27 +144,29 @@ object Test {
         val cateMapping = Source.fromFile(param.categories.get).getLines.zipWithIndex.map {
           case (line, idx) => (idx + 1L, line.toInt)
         }.toMap
-        val results = outputTarget.zip(ds).flatMap{case (outRes, imf) =>
-          val output = outRes._1.toTensor[Float]
-          val target = outRes._2.toTable
+        val results = outputTarget.flatMap{imf =>
+          val prediction = imf[(Activity, Activity)](ImageFeature.predict)
+          val output = prediction._1.toTensor[Float]
+          val target = prediction._2.toTable
           val imgId = COCODataset.fileName2ImgId(imf[String](ImageFeature.uri))
           val result = new ArrayBuffer[COCOResult]()
           MAPUtil.parseSegmentationTensorResult(output,
             (localImgId, label, score, x1, y1, x2, y2) => {
-              // require(RoiImageInfo.getOrigSize(target[Table](localImgId + 1))._3 == imgId)
-              val imId = RoiImageInfo.getOrigSize(target[Table](localImgId + 1))._3
               val x = Math.round(x1 * imf.getOriginalWidth)
               val w = Math.round((x2 - x1) * imf.getOriginalWidth)
               val y = Math.round(y1 * imf.getOriginalHeight)
               val h = Math.round((y2 - y1) * imf.getOriginalHeight)
-              result += new COCOResult(imId, label, Array(x, y, w, h), score)
+              result += new COCOResult(imgId, label, Array(x, y, w, h), score)
             })
           result.toIterator
         }.collect().map(r => new COCOResult(r.imageId, cateMapping(r.categoryId), r.bbox, r.score))
         COCODataset.writeResultsToJsonFile(results, param.output.get)
       } else {
         val evalBcast = sc.broadcast(eval)
-        val evalResult = outputTarget.map{case (output, target) =>
+        val evalResult = outputTarget.map{imf =>
+          val prediction = imf[(Activity, Activity)](ImageFeature.predict)
+          val output = prediction._1.toTensor[Float]
+          val target = prediction._2.toTable
           evalBcast.value(output, target)
         }.reduce((left, right) => {
           left + right

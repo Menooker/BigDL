@@ -320,9 +320,7 @@ class RoiMTImageFeatureToBatch private[bigdl](width: Int, height: Int,
       "in ImageFeature's ISCROWD should be equal to the number of detections in the RoiLabel")
     isCrowdData(position) = isCrowd
     labelData(position) = label
-    val old = img.getOriginalSize
-    origSizeData(position) = (old._1, old._2,
-      COCODataset.fileName2ImgId(img[String](ImageFeature.uri)).toInt)
+    origSizeData(position) = img.getOriginalSize
   }
 
   override protected def createBatch(batchSize: Int): MiniBatch[Float] = {
