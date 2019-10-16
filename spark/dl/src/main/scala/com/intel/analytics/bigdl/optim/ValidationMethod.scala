@@ -418,10 +418,14 @@ class MAPValidationResult(
     require(skipClass >= 0 && skipClass < nClass, s"Invalid skipClass $skipClass")
   }
 
+  private def sortPredictions(p: ArrayBuffer[(Float, Boolean)]): ArrayBuffer[(Float, Boolean)] = {
+    p.sortBy(v => v._1)(Ordering.Float.reverse) // decending order
+  }
+
   private[bigdl] def calculateClassAP(clz: Int): Float = {
     val posCnt = gtCntForClass
     // for each class, first find top k confident samples
-    val sorted = predictForClass(clz).sortBy(v => v._1)(Ordering.Float.reverse) // decending order
+    val sorted = sortPredictions(predictForClass(clz))
     var tp = 0
     val refinedK = if (k > 0) k else sorted.size
     // calculate the max precision for each different recall
@@ -492,8 +496,11 @@ class MAPValidationResult(
   private[optim] def mergeWithoutGtCnt(o: MAPValidationResult): MAPValidationResult = {
     require(predictForClass.length == o.predictForClass.length)
     require(gtCntForClass.length == o.gtCntForClass.length)
-    predictForClass.zip(o.predictForClass).foreach {
-      case (left, right) => left ++= right
+    for (i <- predictForClass.indices) {
+      val (left, right) = (predictForClass(i), o.predictForClass(i))
+      val sorted = sortPredictions(left ++ right)
+      val refinedK = if (k > 0) k else sorted.size
+      predictForClass(i) = sorted.take(refinedK)
     }
     this
   }
@@ -636,7 +643,8 @@ class MeanAveragePrecisionObjectDetection[T: ClassTag](
     })
 
     output match {
-      case outTensor: Tensor[Float] =>
+      case _outTensor: Tensor[_] =>
+        val outTensor = _outTensor.asInstanceOf[Tensor[Float]]
         MAPUtil.parseSegmentationTensorResult(outTensor,
           (imgIdx, label, score, x1, y1, x2, y2) => {
           val gtBbox = gtImages(imgIdx)

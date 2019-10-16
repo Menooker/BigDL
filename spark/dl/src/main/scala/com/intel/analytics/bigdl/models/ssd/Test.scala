@@ -45,7 +45,7 @@ object Test {
     folder: String = ".",
     model: String = "model",
     partitions: Int = 2,
-    batchSize: Int = 10,
+    batchSize: Int = 2,
     resolution: Int = 512,
     output: Option[String] = None,
     categories: Option[String] = None
@@ -78,12 +78,12 @@ object Test {
   }
 
   def test(rdd: RDD[ImageFeature], model: Module[Float], preprocessor: FeatureTransformer,
-    batchSize: Int, resolution: Int)
+    batchSize: Int, resolution: Int, partitions: Int)
   : RDD[ImageFeature] = {
     model.evaluate()
     val bcastModel = ModelBroadcast[Float]().broadcast(rdd.sparkContext, model)
     val toBatch = MTImageFeatureToBatch(resolution, resolution,
-      toRGB = false, extractRoi = true, batchSize = 1,
+      toRGB = false, extractRoi = true, batchSize = partitions,
       transformer = preprocessor)
     val bcastToBatch = rdd.sparkContext.broadcast(toBatch)
     val _batchSize = batchSize
@@ -116,12 +116,12 @@ object Test {
           imf[Array[Byte]](ImageFeature.bytes).length >= imf.getOriginalWidth * imf
             .getOriginalHeight * 3
         })
-          .filter(imf => {
-            if (COCODataset.fileName2ImgId(imf[String](ImageFeature.uri)) < 300) {
+        /*  .filter(imf => {
+            if (COCODataset.fileName2ImgId(imf[String](ImageFeature.uri)) < 3000) {
               println(imf[String](ImageFeature.uri))
               true
             } else false
-          })
+          }) */
       val ds = rawDs
       val model = Module.loadModule[Float](param.model).evaluate()
 
@@ -135,7 +135,8 @@ object Test {
         topK = 100
       ) */
       val eval = MeanAveragePrecisionObjectDetection.createCOCO(81)
-      val outputTarget = test(ds, model, preProcessor, param.batchSize, param.resolution)
+      val outputTarget = test(ds, model, preProcessor,
+        param.batchSize, param.resolution, param.partitions)
       if (param.output.isDefined) {
         require(param.batchSize == 1, "If you need to output the result in JSON, the batchSize" +
           " must be 1")
