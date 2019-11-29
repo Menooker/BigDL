@@ -29,68 +29,61 @@ class CCLParameterSynchronizer[T: ClassTag](val parId: Int, val totalPartition: 
   val k8sAPIServer: String = System.getProperty("ccl.k8sserver")
   require(k8sAPIServer != null, "ccl.k8sserver must be set")
   CCLAdapter.load()
-  ccl.CCLAdapter.setEnv(k8sAPIServer, totalPartition)
-  ccl.CCLAdapter.doInit()
+  CCLAdapter.setEnv(k8sAPIServer, totalPartition)
+  CCLAdapter.doInit()
 
-  private val impl = new BlockManagerParameterSynchronizer[T](parId, totalPartition)
-  val comm: ccl.CCLAdapter = new ccl.CCLAdapter(0)
+  val comm: CCLAdapter = new CCLAdapter(0)
 
   case class LayerInfo(name: String, globalSize: Int, priority: Int,
     weights: Tensor[T], grads: Tensor[T],
-    shadowGrads: Tensor[T], outGrads: Tensor[T], cacheId: Long)
+    outGrads: Tensor[T], cacheId: Long)
+
+  case class RequestInfoWraper(var request: CCLAdapter.RequestInfo)
 
   private val layers = new mutable.HashMap[String, LayerInfo]
-  private val requests = new ConcurrentHashMap[String, ccl.CCLAdapter.RequestInfo]
+  private val requests = new mutable.HashMap[String, RequestInfoWraper]
 
   override def init(name: String, globalSize: Int, priority: Int,
     weights: Tensor[T], grads: Tensor[T]): Unit = {
-    val shadow = Tensor(grads.size())
     val cacheId = comm.createTensorCache(name, grads.nElement())
     layers.update(name, LayerInfo(name, globalSize,
-      priority, weights, grads, shadow, Tensor(grads.size()), cacheId))
-    shadow.copy(grads)
-    impl.init(name, globalSize, priority, null, shadow)
+      priority, weights, grads, Tensor(grads.size()), cacheId))
+    requests.update(name, RequestInfoWraper(null))
   }
 
   override def put(name: String): Unit = {
     val layer = layers(name)
     val arr = layer.grads.storage().array().asInstanceOf[Array[Float]]
     val offset = layer.grads.storageOffset()
-    val len = layer.grads.nElement()
-    layer.shadowGrads.copy(layer.grads)
-
-    requests.put(name, comm.allReduceFloatCached(layer.cacheId, arr, offset - 1))
-    impl.put(name)
+    require(requests.contains(name), s"The layer $name is not in the allreduce request cache")
+    val req = requests(name)
+    require(req.request == null, s"There is an outstanding allreduce request for layer $name")
+    req.request = comm.allReduceFloatCached(layer.cacheId, arr, offset - 1)
   }
 
-  def arrayDiff(a: Tensor[T], b: Tensor[T]): T = {
-    Tensor[T](a.size()).copy(a).sub(b).sumSquare()
-  }
   override def get(name: String): (Tensor[T], Tensor[T]) = {
     val layer = layers(name)
-    val req = requests.get(name)
+    require(requests.contains(name), s"The layer $name is not in the allreduce request cache")
+    val reqWrapper = requests(name)
+    val req = reqWrapper.request
     if (req != null) {
       req.await()
       val ret = layer.outGrads
       req.get(ret.storage().array().asInstanceOf[Array[Float]],
         ret.storageOffset() - 1)
       ret.div(ev.fromType(totalPartition))
-      requests.remove(name)
-
-      val (wei, gra) = impl.get(name)
-      println(name + " PAPAPA3 True Size:" + gra.sum())
-      println(name + " PAPAPA3 My result grad:" + ret.sum())
-      println(name + " PAPAPA4 DIFF " + arrayDiff(gra, ret))
+      reqWrapper.request = null
       (layer.weights, ret)
     } else {
-      println("Request not found " + name)
       (null, null)
     }
 
 
   }
 
-  override def clear(): Unit = {}
+  override def clear(): Unit = {
+    comm.release()
+  }
 
   override def partitionId: Int = parId
 }
