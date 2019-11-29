@@ -422,7 +422,7 @@ object ParallelOptimizer extends AbstractOptimizer {
       }
       Engine.setNodeAndCore(nExecutor, coresPerNode)
       // initialize synchronizer with partition ID and parition number
-      val synchronizer = new BlockManagerParameterSynchronizer[T](partitionId, nExecutor)
+      val synchronizer = DistriParameterSynchronizer[T](partitionId, nExecutor)
       val cached = (0 until _subModelNumber).map { _ =>
         val localModel = modelBroadcast.value(true, false)
         localModel match {
@@ -551,8 +551,7 @@ object ParallelOptimizer extends AbstractOptimizer {
       val localModels = localCache.localModels
       val localWeights = localModels.head.getParameters()._1
       val synchronizer = localCache.parameterSynchronizer
-        .asInstanceOf[BlockManagerParameterSynchronizer[T]]
-      val partitionId = synchronizer.partitionID
+      val partitionId = synchronizer.partitionId
       val start = partitionId * taskSize + math.min(partitionId, extraSize)
       val length = taskSize + (if (partitionId < extraSize) 1 else 0)
       val partitionWeight = Tensor[T](length)

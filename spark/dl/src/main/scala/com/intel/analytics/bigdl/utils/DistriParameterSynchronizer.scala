@@ -61,6 +61,11 @@ trait DistriParameterSynchronizer[T] {
    * clear the synchronizer
    */
   def clear(): Unit
+
+  /**
+   * get the partition ID
+   */
+  def partitionId: Int
 }
 
 class BlockManagerParameterSynchronizer[T: ClassTag](val partitionID: Int, val totalPartition: Int)
@@ -451,6 +456,8 @@ class BlockManagerParameterSynchronizer[T: ClassTag](val partitionID: Int, val t
   private def getParameterBlockId(name: String, counter: Int, pidFrom: Int, pidTo: Int): BlockId = {
     SparkExtension.getLocalBlockId(name + counter +  pidFrom + "paraBytes" + pidTo)
   }
+
+  override def partitionId: Int = partitionID
 }
 
 object BlockManagerParameterSynchronizer {
@@ -474,4 +481,15 @@ object SyncState extends Enumeration{
   val FETCH_PARTITION = Value("1")
   val AGGREGATION = Value("2")
   val PUT_AGGREGATED = Value("3")
+}
+
+object DistriParameterSynchronizer {
+  def apply[T: ClassTag](partitionID: Int, totalPartition: Int)
+    (implicit ev: TensorNumeric[T]): DistriParameterSynchronizer[T] = {
+    if (System.getProperty("ccl.k8sserver") == null) {
+      new BlockManagerParameterSynchronizer[T](partitionID, totalPartition)
+    } else {
+      new CCLParameterSynchronizer[T](partitionID, totalPartition)
+    }
+  }
 }
