@@ -36,7 +36,7 @@ class CCLParameterSynchronizer[T: ClassTag](val parId: Int, val totalPartition: 
 
   case class LayerInfo(name: String, globalSize: Int, priority: Int,
     weights: Tensor[T], grads: Tensor[T],
-    outGrads: Tensor[T], cacheId: Long)
+    shadowGrads: Tensor[T], cacheId: Long)
 
   case class RequestInfoWraper(var request: CCLAdapter.RequestInfo)
 
@@ -68,12 +68,12 @@ class CCLParameterSynchronizer[T: ClassTag](val parId: Int, val totalPartition: 
     val req = reqWrapper.request
     if (req != null) {
       req.await()
-      val ret = layer.outGrads
+      val ret = layer.grads
       req.get(ret.storage().array().asInstanceOf[Array[Float]],
         ret.storageOffset() - 1)
       ret.div(ev.fromType(totalPartition))
       reqWrapper.request = null
-      (layer.weights, ret)
+      (layer.weights, layer.grads)
     } else {
       (null, null)
     }
