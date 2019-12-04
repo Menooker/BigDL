@@ -15,11 +15,10 @@
  */
 package com.intel.analytics.bigdl.utils
 
-import com.intel.analytics.bigdl.ccl
 import com.intel.analytics.bigdl.ccl.CCLAdapter
+import com.intel.analytics.bigdl.parameters.FP16CompressedTensor
 import com.intel.analytics.bigdl.tensor.Tensor
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
-import java.util.concurrent.ConcurrentHashMap
 import scala.collection.mutable
 import scala.reflect.ClassTag
 
@@ -35,10 +34,9 @@ class CCLParameterSynchronizer[T: ClassTag](val parId: Int, val totalPartition: 
   val comm: CCLAdapter = new CCLAdapter(0)
 
   case class LayerInfo(name: String, globalSize: Int, priority: Int,
-    weights: Tensor[T], grads: Tensor[T],
-    shadowGrads: Tensor[T], cacheId: Long)
+    weights: Tensor[T], grads: Tensor[T], cacheId: Long)
 
-  case class RequestInfoWraper(var request: CCLAdapter.RequestInfo)
+  case class RequestInfoWraper(var request: CCLAdapter.RequestInfo, var cnt: Int = 0)
 
   private val layers = new mutable.HashMap[String, LayerInfo]
   private val requests = new mutable.HashMap[String, RequestInfoWraper]
@@ -47,7 +45,7 @@ class CCLParameterSynchronizer[T: ClassTag](val parId: Int, val totalPartition: 
     weights: Tensor[T], grads: Tensor[T]): Unit = {
     val cacheId = comm.createTensorCache(name, grads.nElement())
     layers.update(name, LayerInfo(name, globalSize,
-      priority, weights, grads, Tensor(grads.size()), cacheId))
+      priority, weights, grads, cacheId))
     requests.update(name, RequestInfoWraper(null))
   }
 
@@ -57,28 +55,32 @@ class CCLParameterSynchronizer[T: ClassTag](val parId: Int, val totalPartition: 
     val offset = layer.grads.storageOffset()
     require(requests.contains(name), s"The layer $name is not in the allreduce request cache")
     val req = requests(name)
+    req.cnt += 1
     require(req.request == null, s"There is an outstanding allreduce request for layer $name")
     req.request = comm.allReduceFloatCached(layer.cacheId, arr, offset - 1)
   }
+
 
   override def get(name: String): (Tensor[T], Tensor[T]) = {
     val layer = layers(name)
     require(requests.contains(name), s"The layer $name is not in the allreduce request cache")
     val reqWrapper = requests(name)
-    val req = reqWrapper.request
-    if (req != null) {
-      req.await()
-      val ret = layer.grads
-      req.get(ret.storage().array().asInstanceOf[Array[Float]],
-        ret.storageOffset() - 1)
-      ret.div(ev.fromType(totalPartition))
-      reqWrapper.request = null
-      (layer.weights, layer.grads)
-    } else {
-      (null, null)
+    if (reqWrapper.cnt == 0) {
+      return (null, null)
     }
+    val req = reqWrapper.request
+    require(req != null)
+    req.await()
+    val ret = layer.grads
+    req.get(ret.storage().array().asInstanceOf[Array[Float]],
+      ret.storageOffset() - 1)
+    ret.div(ev.fromType(totalPartition))
+    reqWrapper.request = null
 
-
+    val fp16paramAggregated = new FP16CompressedTensor[T](ret.nElement())
+    fp16paramAggregated.compress(0, ret, 0, ret.nElement())
+    fp16paramAggregated.deCompress(ret)
+    (layer.weights, ret)
   }
 
   override def clear(): Unit = {
