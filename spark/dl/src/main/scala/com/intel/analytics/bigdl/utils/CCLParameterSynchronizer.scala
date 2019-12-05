@@ -57,7 +57,7 @@ class CCLParameterSynchronizer[T: ClassTag](val parId: Int, val totalPartition: 
     val req = requests(name)
     req.cnt += 1
     require(req.request == null, s"There is an outstanding allreduce request for layer $name")
-    req.request = comm.allReduceFloatCached(layer.cacheId, arr, offset - 1)
+    req.request = comm.allReduceFP16Cached(layer.cacheId, arr, offset - 1)
   }
 
 
@@ -77,9 +77,6 @@ class CCLParameterSynchronizer[T: ClassTag](val parId: Int, val totalPartition: 
     ret.div(ev.fromType(totalPartition))
     reqWrapper.request = null
 
-    val fp16paramAggregated = new FP16CompressedTensor[T](ret.nElement())
-    fp16paramAggregated.compress(0, ret, 0, ret.nElement())
-    fp16paramAggregated.deCompress(ret)
     (layer.weights, ret)
   }
 
