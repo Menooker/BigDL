@@ -16,7 +16,6 @@
 package com.intel.analytics.bigdl.utils
 
 import com.intel.analytics.bigdl.ccl.CCLAdapter
-import com.intel.analytics.bigdl.parameters.FP16CompressedTensor
 import com.intel.analytics.bigdl.tensor.Tensor
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
 import scala.collection.mutable
@@ -57,7 +56,7 @@ class CCLParameterSynchronizer[T: ClassTag](val parId: Int, val totalPartition: 
     val req = requests(name)
     req.cnt += 1
     require(req.request == null, s"There is an outstanding allreduce request for layer $name")
-    req.request = comm.allReduceFP16Cached(layer.cacheId, arr, offset - 1)
+    req.request = comm.allReduceFP16Cached(layer.cacheId, arr, offset - 1, layer.priority)
   }
 
 
